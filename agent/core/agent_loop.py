@@ -180,29 +180,27 @@ def _friendly_error_message(error: Exception) -> str | None:
 
 async def _compact_and_notify(session: Session) -> None:
     """Run compaction and send event if context was reduced."""
-    old_length = session.context_manager.context_length
-    max_ctx = session.context_manager.max_context
+    cm = session.context_manager
+    old_usage = cm.running_context_usage
     logger.debug(
-        "Compaction check: context_length=%d, max_context=%d, needs_compact=%s",
-        old_length, max_ctx, old_length > max_ctx,
+        "Compaction check: usage=%d, max=%d, threshold=%d, needs_compact=%s",
+        old_usage, cm.model_max_tokens, cm.compaction_threshold, cm.needs_compaction,
     )
-    tool_specs = session.tool_router.get_tool_specs_for_llm()
-    await session.context_manager.compact(
+    await cm.compact(
         model_name=session.config.model_name,
-        tool_specs=tool_specs,
+        tool_specs=session.tool_router.get_tool_specs_for_llm(),
         hf_token=session.hf_token,
     )
-    new_length = session.context_manager.context_length
-    if new_length != old_length:
+    new_usage = cm.running_context_usage
+    if new_usage != old_usage:
         logger.warning(
             "Context compacted: %d -> %d tokens (max=%d, %d messages)",
-            old_length, new_length, max_ctx,
-            len(session.context_manager.items),
+            old_usage, new_usage, cm.model_max_tokens, len(cm.items),
         )
         await session.send_event(
             Event(
                 event_type="compacted",
-                data={"old_tokens": old_length, "new_tokens": new_length},
+                data={"old_tokens": old_usage, "new_tokens": new_usage},
             )
         )
 
@@ -576,13 +574,13 @@ class Handlers:
                     logger.debug(
                         "Agent loop ending: no tool calls. "
                         "finish_reason=%s, token_count=%d, "
-                        "context_length=%d, max_context=%d, "
+                        "usage=%d, model_max_tokens=%d, "
                         "iteration=%d/%d, "
                         "response_text=%s",
                         finish_reason,
                         token_count,
-                        session.context_manager.context_length,
-                        session.context_manager.max_context,
+                        session.context_manager.running_context_usage,
+                        session.context_manager.model_max_tokens,
                         iteration,
                         max_iterations,
                         (content or "")[:500],
@@ -785,17 +783,13 @@ class Handlers:
 
             except ContextWindowExceededError:
                 # Force compact and retry this iteration
+                cm = session.context_manager
                 logger.warning(
                     "ContextWindowExceededError at iteration %d — forcing compaction "
-                    "(context_length=%d, max_context=%d, messages=%d)",
-                    iteration,
-                    session.context_manager.context_length,
-                    session.context_manager.max_context,
-                    len(session.context_manager.items),
+                    "(usage=%d, model_max_tokens=%d, messages=%d)",
+                    iteration, cm.running_context_usage, cm.model_max_tokens, len(cm.items),
                 )
-                session.context_manager.context_length = (
-                    session.context_manager.max_context + 1
-                )
+                cm.running_context_usage = cm.model_max_tokens + 1
                 await _compact_and_notify(session)
                 continue
 
