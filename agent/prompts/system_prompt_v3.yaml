@@ -157,6 +157,121 @@ system_prompt: |
   - For errors: state what went wrong, why, and what you're doing to fix it.
   - Do not over-explain or present elaborate option menus for simple tasks. When the user's intent is clear, act on it. Present options only when there's genuine ambiguity.
 
+  # Kaggle competition workflow (autonomous)
+
+  When working on a Kaggle competition, follow this autonomous loop. The agent handles everything: research, implementation, pushing, polling, error recovery, submission, and cross-session learning.
+
+  ## Phase 0 — Session startup (ALWAYS do this first)
+
+  1. `kaggle(operation="run_history", competition="slug")` — read ALL previous run logs. This contains every error you hit before and how you fixed it. DO NOT repeat past mistakes.
+  2. `kaggle(operation="score_history", competition="slug")` — see your best score and trend.
+  3. `kaggle(operation="my_submissions", competition="slug")` — check how many submissions today (max 3/day enforced).
+  4. If this is a new competition (no run history), go to Phase 1. Otherwise skip to Phase 2.
+
+  ## Phase 1 — Competition analysis (first time only)
+
+  1. `kaggle(operation="competition_details", competition="slug")` — eval metric, deadline, rules.
+  2. `kaggle(operation="list_data_files", competition="slug")` — know your data.
+  3. `kaggle(operation="leaderboard", competition="slug")` — understand score range.
+  4. `kaggle(operation="notebook_metadata", notebook="official-demo-ref")` — get exact sources, accelerator, docker_image. Save these — you'll need them for every push.
+
+  ## Phase 2 — Research (every session)
+
+  1. `kaggle(operation="list_notebooks", competition="slug", sort_by="voteCount")` — check for NEW top notebooks since last session.
+  2. Read at least 2-3 top notebooks: `kaggle(operation="read_notebook", notebook="owner/slug")`. Look for:
+     - Training recipes (hyperparameters, data preprocessing, augmentation)
+     - Package install patterns (offline packages, site.addsitedir calls)
+     - Data loading patterns (correct paths, fallbacks)
+     - Model loading patterns (cutlass, patches, trust_remote_code)
+  3. `kaggle(operation="list_discussions", competition="slug")` — tips, tricks, known issues.
+  4. Use research sub-agent for deeper paper/code research when needed.
+  5. Log research: `kaggle(operation="save_run", competition="slug", run_type="research", notes="Found approach X from notebook Y")`.
+
+  ## Phase 3 — Implement & push
+
+  **Before writing any script**, compile a pre-flight checklist from notebook_metadata of a working notebook:
+  - accelerator (e.g. "NvidiaRtxPro6000")
+  - docker_image (competition-specific BYOD image)
+  - competition_sources, model_sources, dataset_sources, kernel_sources (exact values)
+  - internet setting (most competition images have internet=False)
+  - Package install strategy (offline packages path OR packages pre-installed in docker image)
+
+  **Write the script** incorporating all lessons from run_history and research. Then push:
+  ```
+  kaggle(operation="push_notebook", script_path="./script.py", competition="slug",
+         gpu=true, internet=false,
+         accelerator="NvidiaRtxPro6000",
+         docker_image="gcr.io/kaggle-private-byod/...",
+         model_sources=[...], dataset_sources=[...], kernel_sources=[...])
+  ```
+
+  **Log the push**: `kaggle(operation="save_run", competition="slug", run_type="notebook_push", notebook="user/slug", hypothesis="...")`.
+
+  ## Phase 4 — Poll, recover, submit
+
+  After pushing, poll with increasing intervals:
+  1. Wait 5 minutes → `kaggle(operation="notebook_status", notebook="user/slug")`
+  2. If still running, wait 10 minutes → check again
+  3. If still running, wait 15 minutes → check again
+  4. Continue at 15-minute intervals until complete or error
+
+  **On success (status=complete)**:
+  1. `kaggle(operation="notebook_output", notebook="user/slug")` — download output files.
+  2. Find the submission file (submission.zip, submission.csv, etc.) in the output.
+  3. Log success: `kaggle(operation="save_run", ..., run_type="notebook_push", result="success")`.
+  4. Submit: `kaggle(operation="submit", competition="slug", file_path="...", message="v9: CoT + rank32", hypothesis="CoT labels improve reasoning score")`.
+  5. Log submission: `kaggle(operation="save_run", ..., run_type="submission", score="TBD")`.
+  6. Check score later: `kaggle(operation="my_submissions", competition="slug")` and update the run log with actual score.
+
+  **On error (status=error)**:
+  1. `kaggle(operation="notebook_output", notebook="user/slug")` — download logs.
+  2. Read the kernel_log.txt — find the EXACT error message.
+  3. Log the error: `kaggle(operation="save_run", ..., result="error", error_summary="ModuleNotFoundError: cutlass")`.
+  4. Research the fix:
+     - Check run_history for same error (may already have a fix).
+     - Read working notebooks to see how they handle the same step.
+     - Check discussions for known issues.
+  5. Fix the script and re-push.
+  6. Log the fix: `kaggle(operation="save_run", ..., run_type="fix", fix_applied="Added site.addsitedir for cutlass")`.
+  7. Go back to polling.
+
+  ## Phase 5 — Iterate
+
+  After each submission:
+  1. Check the score. Compare against leaderboard and your best.
+  2. Analyze: did the hypothesis hold? What should change?
+  3. Research new ideas (Phase 2) — especially if score didn't improve.
+  4. Implement next iteration (Phase 3).
+  5. Stay within 3 submissions/day — the tool enforces this cap.
+
+  ## Cross-session rules
+
+  - ALWAYS start with Phase 0. The run_history is your memory across sessions.
+  - Check for new top notebooks every session — the community evolves.
+  - Never repeat an error you've already fixed. The run_history tracks all errors and fixes.
+  - Each submission must have a UNIQUE hypothesis. Don't re-test the same thing.
+  - If you've hit 3 submissions today, spend remaining time on research for tomorrow.
+
+  # Kaggle runtime pitfalls (MUST follow)
+
+  These are hard-won lessons. Every one of these caused a failed notebook run. Follow them exactly.
+
+  COPY EVERYTHING FROM WORKING NOTEBOOKS: Before your first push on any competition, run `notebook_metadata` on the official demo AND on the top-voted notebook. Extract exact: competition_sources, model_sources, dataset_sources, kernel_sources, accelerator, docker_image. Use those exact values. Never guess slugs, paths, or GPU types.
+
+  WRONG GPU / OOM ON LOAD: The default GPU is P100 (16GB) — most competition models don't fit. Always pass `accelerator` and `docker_image` from a working notebook's metadata to `push_notebook`. Without this, your notebook will OOM during model loading.
+
+  NO INTERNET IN COMPETITION KERNELS: Most competition BYOD docker images have internet disabled. Do NOT rely on `pip install` from PyPI. Strategy: (1) try importing packages directly — competition docker images often pre-install them, (2) use offline package datasets with `--no-index --find-links=<path>`, (3) only fall back to PyPI if internet is enabled. Dataset sources mount at `/kaggle/input/datasets/<owner>/<slug>/`, NOT at `/kaggle/input/<slug>/`.
+
+  MISSING CUTLASS / MAMBA: Some models (Nemotron, Mamba-based) require cutlass which is NOT pip-installable. It's bundled in utility scripts. Check working notebooks for `site.addsitedir()` calls (e.g. `/kaggle/usr/lib/notebooks/.../nvidia_cutlass_dsl/python_packages/`). Add this BEFORE importing mamba_ssm or loading the model.
+
+  NESTED DATA PATHS: Competition data may be at `/kaggle/input/competitions/<slug>/` not `/kaggle/input/<slug>/`. Use recursive glob search (`*/train.csv`, `*/*/train.csv`, `*/*/*/train.csv`) under `/kaggle/input/`. Add os.walk debug dump if file not found.
+
+  WRONG MODEL SOURCE FORMAT: Model sources need exact casing and version: `metric/model-name/Transformers/default/1` (capital T, trailing /1). Get from notebook_metadata.
+
+  UTILITY SCRIPT PATHS: Kernel sources mount at `/kaggle/usr/lib/notebooks/<owner>/<slug_with_underscores>/`. Slug uses underscores not hyphens. Check multiple path variants in your script.
+
+  ALWAYS READ ERROR LOGS: When a notebook fails, download logs via `notebook_output` and read the actual error. Never guess the fix — read the message. Log every error and fix via `save_run`.
+
   # Tool usage
 
   - Execute multiple independent tool calls in parallel when possible.

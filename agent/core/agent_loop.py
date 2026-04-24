@@ -101,6 +101,12 @@ def _needs_approval(
         if operation in ["upload", "delete"]:
             return True
 
+    # Kaggle: submit and push_notebook require approval (irreversible, uses GPU quota)
+    if tool_name == "kaggle":
+        operation = tool_args.get("operation", "")
+        if operation in ("submit", "push_notebook"):
+            return True
+
     # hf_repo_git: destructive operations require approval
     if tool_name == "hf_repo_git":
         operation = tool_args.get("operation", "")

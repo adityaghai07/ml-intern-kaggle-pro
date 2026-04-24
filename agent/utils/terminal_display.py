@@ -149,7 +149,7 @@ def print_tool_call(tool_name: str, args_preview: str) -> None:
     # CRT-style: type out tool name in HF yellow
     gold = "\033[38;2;255;200;80m"
     reset = "\033[0m"
-    f.write(f"{_I}{gold}▸ ")
+    f.write(f"{_I}{gold}> ")
     for ch in tool_name:
         f.write(ch)
         f.flush()
