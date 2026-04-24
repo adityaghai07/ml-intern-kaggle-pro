@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/public/smolagents.webp" alt="smolagents logo" width="160" />
+  <img src="frontend\public\smolagents_kaggle.png" alt="smolagents logo" width="160" />
 </p>
 
 # ML Intern Kaggle Pro
@@ -173,4 +173,4 @@ Edit `agent/tools/kaggle_tool.py`:
 ## Credits
 
 - Forked from [huggingface/ml-intern](https://github.com/huggingface/ml-intern)
-- Kaggle integration by [@adityaghai01](https://github.com/adityaghai01)
+- Kaggle integration by [@adityaghai07](https://github.com/adityaghai07)
