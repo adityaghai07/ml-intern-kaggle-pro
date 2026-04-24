@@ -39,6 +39,7 @@ RESEARCH_TOOL_NAMES = {
     "github_read_file",
     "hf_inspect_dataset",
     "hf_repo_files",
+    "kaggle",
 }
 
 RESEARCH_SYSTEM_PROMPT = """\
@@ -105,6 +106,19 @@ tell you what actually works.
 
 ## Hub repo inspection
 - `hf_repo_files`: List/read files in any HF repo (model, dataset, space)
+
+## Kaggle competition research (read-only)
+- `kaggle(operation="list_competitions", search="...")`: Find active competitions
+- `kaggle(operation="competition_details", competition="slug")`: Get eval metric, deadline, rules
+- `kaggle(operation="list_notebooks", competition="slug", sort_by="voteCount")`: Find top-voted notebooks
+- `kaggle(operation="list_notebooks", competition="slug", sort_by="scoreAscending")`: Find highest-scoring notebooks
+- `kaggle(operation="read_notebook", notebook="owner/slug")`: Read full notebook source as markdown
+- `kaggle(operation="list_discussions", competition="slug")`: Find discussion topics
+- `kaggle(operation="read_discussion", topic_id="...")`: Read discussion with replies
+- `kaggle(operation="leaderboard", competition="slug")`: View top leaderboard scores
+- `kaggle(operation="notebook_metadata", notebook="owner/slug")`: Get exact sources, accelerator, docker_image from a working notebook — ALWAYS use before push_notebook
+- `kaggle(operation="run_history", competition="slug")`: View past errors, fixes, and scores — read this to avoid repeating mistakes
+- `kaggle(operation="save_run", competition="slug", run_type="research", notes="...")`: Log research findings for cross-session learning
 
 # Correct research pattern
 

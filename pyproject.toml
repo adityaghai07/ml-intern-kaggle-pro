@@ -3,7 +3,7 @@ name = "hf-agent"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     # Core dependencies
     "datasets>=4.4.1",
@@ -21,6 +21,7 @@ dependencies = [
     "nbconvert>=7.16.6",
     "nbformat>=5.10.4",
     "whoosh>=2.7.4",
+    "kaggle>=1.6.0",
     # Web backend dependencies
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",

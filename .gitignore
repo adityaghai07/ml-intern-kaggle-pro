@@ -72,3 +72,6 @@ checkpoint-*/
 runs/
 wandb/
 frontend/tsconfig.tsbuildinfo
+
+# Kaggle output (downloaded logs/artifacts)
+kaggle_output/

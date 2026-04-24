@@ -46,6 +46,7 @@ from agent.tools.hf_repo_git_tool import (
     hf_repo_git_handler,
 )
 from agent.tools.jobs_tool import HF_JOBS_TOOL_SPEC, hf_jobs_handler
+from agent.tools.kaggle_tool import KAGGLE_TOOL_SPEC, kaggle_handler
 from agent.tools.papers_tool import HF_PAPERS_TOOL_SPEC, hf_papers_handler
 from agent.tools.plan_tool import PLAN_TOOL_SPEC, plan_tool_handler
 from agent.tools.research_tool import RESEARCH_TOOL_SPEC, research_handler
@@ -360,6 +361,13 @@ def create_builtin_tools(local_mode: bool = False) -> list[ToolSpec]:
             description=GITHUB_READ_FILE_TOOL_SPEC["description"],
             parameters=GITHUB_READ_FILE_TOOL_SPEC["parameters"],
             handler=github_read_file_handler,
+        ),
+        # Kaggle competition tool
+        ToolSpec(
+            name=KAGGLE_TOOL_SPEC["name"],
+            description=KAGGLE_TOOL_SPEC["description"],
+            parameters=KAGGLE_TOOL_SPEC["parameters"],
+            handler=kaggle_handler,
         ),
     ]
 
