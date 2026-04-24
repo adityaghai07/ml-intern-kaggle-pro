@@ -34,6 +34,41 @@ MAX_LIMIT = 50
 MAX_NOTEBOOK_CHARS = 12_000
 
 # ---------------------------------------------------------------------------
+# Shared HTTP client with connection pooling
+# ---------------------------------------------------------------------------
+
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client(**kwargs) -> httpx.AsyncClient:
+    """Return a shared httpx client with connection pooling.
+
+    Reuses TCP connections across API calls instead of creating a new
+    TLS handshake for every request. The pool allows up to 10 concurrent
+    connections (5 per host) which covers polling + parallel research calls.
+    """
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
+            limits=httpx.Limits(
+                max_connections=10,
+                max_keepalive_connections=5,
+                keepalive_expiry=120,
+            ),
+            follow_redirects=True,
+            timeout=httpx.Timeout(30, connect=10),
+        )
+    return _client
+
+
+async def _close_client() -> None:
+    """Close the shared client (call on shutdown)."""
+    global _client
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+        _client = None
+
+# ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
 
@@ -122,10 +157,17 @@ def _save_run(competition: str, entry: dict) -> None:
 
 
 def _today_submission_count(competition: str) -> int:
-    """Count submissions made today (for daily cap enforcement)."""
+    """Count submissions made today (for daily cap enforcement).
+
+    Checks both agent_runs/ (run log) and agent_scores/ (score history)
+    to avoid bypassing the cap if the agent restarts without save_run.
+    """
     today = time.strftime("%Y-%m-%d")
     runs = _load_runs(competition)
-    return sum(1 for r in runs if r.get("type") == "submission" and r.get("timestamp", "").startswith(today))
+    run_count = sum(1 for r in runs if r.get("type") == "submission" and r.get("timestamp", "").startswith(today))
+    scores = _load_scores(competition)
+    score_count = sum(1 for s in scores if s.get("timestamp", "").startswith(today))
+    return max(run_count, score_count)
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +223,8 @@ async def _list_competitions(args: dict, limit: int) -> ToolResult:
     if args.get("sort_by"):
         params["sortBy"] = args["sort_by"]
 
-    async with httpx.AsyncClient() as client:
-        data = await _kaggle_get(client, "/competitions/list", params)
+    client = _get_client()
+    data = await _kaggle_get(client, "/competitions/list", params)
 
     if data is None:
         return ToolResult(formatted="No competitions found or API error.", isError=True)
@@ -206,9 +248,9 @@ async def _competition_details(args: dict, _limit: int) -> ToolResult:
     if not comp:
         return ToolResult(formatted="Error: `competition` parameter is required.", isError=True)
 
-    async with httpx.AsyncClient() as client:
-        # The list endpoint with search is the most reliable way to get details
-        data = await _kaggle_get(client, "/competitions/list", {"search": comp})
+    client = _get_client()
+    # The list endpoint with search is the most reliable way to get details
+    data = await _kaggle_get(client, "/competitions/list", {"search": comp})
 
     if not data or not isinstance(data, list):
         return ToolResult(formatted=f"Competition '{comp}' not found.", isError=True)
@@ -250,8 +292,8 @@ async def _list_data_files(args: dict, limit: int) -> ToolResult:
     if not comp:
         return ToolResult(formatted="Error: `competition` parameter is required.", isError=True)
 
-    async with httpx.AsyncClient() as client:
-        data = await _kaggle_get(client, f"/competitions/data/list/{comp}")
+    client = _get_client()
+    data = await _kaggle_get(client, f"/competitions/data/list/{comp}")
 
     if data is None:
         return ToolResult(formatted=f"No data files found for '{comp}'.", isError=True)
@@ -278,8 +320,8 @@ async def _list_notebooks(args: dict, limit: int) -> ToolResult:
         "pageSize": min(limit, 20),
     }
 
-    async with httpx.AsyncClient() as client:
-        data = await _kaggle_get(client, "/kernels/list", params)
+    client = _get_client()
+    data = await _kaggle_get(client, "/kernels/list", params)
 
     if data is None:
         return ToolResult(formatted=f"No notebooks found for '{comp}'.", isError=True)
@@ -305,8 +347,8 @@ async def _read_notebook(args: dict, _limit: int) -> ToolResult:
     # Pull kernel source via API
     params = {"userName": ref.split("/")[0], "kernelSlug": ref.split("/")[-1]} if "/" in ref else {"kernelSlug": ref}
 
-    async with httpx.AsyncClient() as client:
-        data = await _kaggle_get(client, "/kernels/pull", params)
+    client = _get_client()
+    data = await _kaggle_get(client, "/kernels/pull", params)
 
     if data is None:
         return ToolResult(formatted=f"Notebook '{ref}' not found.", isError=True)
@@ -351,8 +393,8 @@ async def _notebook_metadata(args: dict, _limit: int) -> ToolResult:
 
     params = {"userName": ref.split("/")[0], "kernelSlug": ref.split("/")[-1]} if "/" in ref else {"kernelSlug": ref}
 
-    async with httpx.AsyncClient() as client:
-        data = await _kaggle_get(client, "/kernels/pull", params)
+    client = _get_client()
+    data = await _kaggle_get(client, "/kernels/pull", params)
 
     if data is None:
         return ToolResult(formatted=f"Notebook '{ref}' not found.", isError=True)
@@ -391,20 +433,20 @@ async def _list_discussions(args: dict, limit: int) -> ToolResult:
         "sort": "recent",
     }
 
-    async with httpx.AsyncClient() as client:
-        # Try the competition-specific forum listing
+    client = _get_client()
+    # Try the competition-specific forum listing
+    data = await _kaggle_get(
+        client,
+        f"/competitions/{comp}/forum/list",
+        params,
+    )
+    # Fallback to general forum API if competition-specific fails
+    if data is None:
         data = await _kaggle_get(
             client,
-            f"/competitions/{comp}/forum/list",
-            params,
+            "/forums/list",
+            {"competition": comp, "page": 1},
         )
-        # Fallback to general forum API if competition-specific fails
-        if data is None:
-            data = await _kaggle_get(
-                client,
-                "/forums/list",
-                {"competition": comp, "page": 1},
-            )
 
     if data is None or (isinstance(data, list) and len(data) == 0):
         return ToolResult(
@@ -429,8 +471,8 @@ async def _read_discussion(args: dict, _limit: int) -> ToolResult:
     if not topic_id:
         return ToolResult(formatted="Error: `topic_id` parameter is required.", isError=True)
 
-    async with httpx.AsyncClient() as client:
-        data = await _kaggle_get(client, f"/forums/{topic_id}")
+    client = _get_client()
+    data = await _kaggle_get(client, f"/forums/{topic_id}")
 
     if data is None:
         return ToolResult(
@@ -473,8 +515,8 @@ async def _leaderboard(args: dict, limit: int) -> ToolResult:
     if not comp:
         return ToolResult(formatted="Error: `competition` parameter is required.", isError=True)
 
-    async with httpx.AsyncClient() as client:
-        data = await _kaggle_get(client, f"/competitions/{comp}/leaderboard/view")
+    client = _get_client()
+    data = await _kaggle_get(client, f"/competitions/{comp}/leaderboard/view")
 
     if data is None:
         return ToolResult(formatted=f"Leaderboard not available for '{comp}'.", isError=True)
@@ -501,8 +543,8 @@ async def _my_submissions(args: dict, limit: int) -> ToolResult:
     if not comp:
         return ToolResult(formatted="Error: `competition` parameter is required.", isError=True)
 
-    async with httpx.AsyncClient() as client:
-        data = await _kaggle_get(client, f"/competitions/submissions/list/{comp}")
+    client = _get_client()
+    data = await _kaggle_get(client, f"/competitions/submissions/list/{comp}")
 
     if data is None:
         return ToolResult(formatted=f"No submissions found for '{comp}'.", isError=True)
@@ -596,33 +638,33 @@ async def _submit(args: dict, _limit: int) -> ToolResult:
 
         headers = _require_auth()
         try:
-            async with httpx.AsyncClient() as client:
-                url = f"{KAGGLE_API}/competitions/submissions/url/{comp}"
-                resp = await client.post(
-                    url,
-                    headers=headers,
-                    json={"fileName": os.path.basename(file_path), "contentLength": os.path.getsize(file_path)},
-                    timeout=30,
-                )
-                if resp.status_code == 200:
-                    upload_info = resp.json()
-                    upload_url = upload_info.get("createUrl", "")
-                    if upload_url:
-                        with open(file_path, "rb") as f:
-                            upload_resp = await client.put(upload_url, content=f.read(), timeout=120)
-                        if upload_resp.status_code in (200, 201):
-                            token = upload_info.get("token", "")
-                            submit_resp = await client.post(
-                                f"{KAGGLE_API}/competitions/submissions/submit/{comp}",
-                                headers=headers,
-                                json={"blobFileTokens": token, "submissionDescription": message},
-                                timeout=30,
-                            )
-                            result = submit_resp.text
-                        else:
-                            result = f"Upload failed: {upload_resp.status_code}"
-                else:
-                    raise RuntimeError(f"Direct upload init failed ({resp.status_code})")
+            client = _get_client()
+            url = f"{KAGGLE_API}/competitions/submissions/url/{comp}"
+            resp = await client.post(
+                url,
+                headers=headers,
+                json={"fileName": os.path.basename(file_path), "contentLength": os.path.getsize(file_path)},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                upload_info = resp.json()
+                upload_url = upload_info.get("createUrl", "")
+                if upload_url:
+                    with open(file_path, "rb") as f:
+                        upload_resp = await client.put(upload_url, content=f.read(), timeout=120)
+                    if upload_resp.status_code in (200, 201):
+                        token = upload_info.get("token", "")
+                        submit_resp = await client.post(
+                            f"{KAGGLE_API}/competitions/submissions/submit/{comp}",
+                            headers=headers,
+                            json={"blobFileTokens": token, "submissionDescription": message},
+                            timeout=30,
+                        )
+                        result = submit_resp.text
+                    else:
+                        result = f"Upload failed: {upload_resp.status_code}"
+            else:
+                raise RuntimeError(f"Direct upload init failed ({resp.status_code})")
         except Exception:
             try:
                 def _do_submit():
@@ -754,13 +796,13 @@ async def _push_notebook(args: dict, _limit: int) -> ToolResult:
         payload["dockerImagePinningType"] = "original"
         payload["dockerImageNullable"] = docker_image
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{KAGGLE_API}/kernels/push",
-            headers=headers,
-            json=payload,
-            timeout=60,
-        )
+    client = _get_client()
+    resp = await client.post(
+        f"{KAGGLE_API}/kernels/push",
+        headers=headers,
+        json=payload,
+        timeout=60,
+    )
 
     if resp.status_code not in (200, 201):
         return ToolResult(
@@ -813,57 +855,59 @@ async def _notebook_status(args: dict, _limit: int) -> ToolResult:
     headers = _require_auth()
 
     # Try the status endpoint first
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{KAGGLE_API}/kernels/status",
-            headers=headers,
-            params={"userName": parts[0], "kernelSlug": parts[-1]},
-            timeout=15,
-        )
+    client = _get_client()
+    resp = await client.get(
+        f"{KAGGLE_API}/kernels/status",
+        headers=headers,
+        params={"userName": parts[0], "kernelSlug": parts[-1]},
+        timeout=15,
+    )
 
-        if resp.status_code == 200:
-            data = resp.json()
-            status = data.get("status", "unknown")
-            failure_msg = data.get("failureMessage", "")
+    if resp.status_code == 200:
+        data = resp.json()
+        status = data.get("status", "unknown")
+        failure_msg = data.get("failureMessage", "")
 
-            emoji_map = {
-                "queued": "[QUEUED]", "running": "[RUNNING]", "complete": "[COMPLETE]",
-                "error": "[ERROR]", "cancelAcknowledged": "[CANCELLED]",
-            }
-            status_label = emoji_map.get(status, f"[{status.upper()}]")
+        emoji_map = {
+            "queued": "[QUEUED]", "running": "[RUNNING]", "complete": "[COMPLETE]",
+            "error": "[ERROR]", "cancelAcknowledged": "[CANCELLED]",
+        }
+        status_label = emoji_map.get(status, f"[{status.upper()}]")
 
-            lines = [
-                f"**Kernel status for `{ref}`**: {status_label} `{status}`",
-            ]
-            if failure_msg:
-                lines.append(f"**Failure message**: {failure_msg}")
-            if status == "complete":
-                lines.append(f"\nGet output: `kaggle(operation=\"notebook_output\", notebook=\"{ref}\")`")
-            elif status in ("queued", "running"):
-                lines.append(f"\nStill running. Check again in a few minutes.")
-            return ToolResult(formatted="\n".join(lines), totalResults=1, resultsShared=1)
+        lines = [
+            f"**Kernel status for `{ref}`**: {status_label} `{status}`",
+            f"**View notebook**: https://www.kaggle.com/code/{ref}",
+        ]
+        if failure_msg:
+            lines.append(f"**Failure message**: {failure_msg}")
+        if status == "complete":
+            lines.append(f"\nGet output: `kaggle(operation=\"notebook_output\", notebook=\"{ref}\")`")
+        elif status in ("queued", "running"):
+            lines.append(f"\nStill running. Check again in a few minutes.")
+            lines.append(f"View live: `kaggle(operation=\"notebook_log\", notebook=\"{ref}\")`")
+        return ToolResult(formatted="\n".join(lines), totalResults=1, resultsShared=1)
 
-        # Fallback: try pulling kernel info (works with some token scopes)
-        pull_resp = await client.get(
-            f"{KAGGLE_API}/kernels/pull",
-            headers=headers,
-            params={"userName": parts[0], "kernelSlug": parts[-1]},
-            timeout=15,
-        )
-        if pull_resp.status_code == 200:
-            data = pull_resp.json()
-            meta = data.get("metadata", {})
-            last_run = meta.get("lastRunTime", "unknown")
-            lines = [
-                f"**Kernel `{ref}`** — pull succeeded",
-                f"**Title**: {meta.get('title', '?')}",
-                f"**Last run**: {last_run}",
-                f"**GPU**: {meta.get('enableGpu', '?')}",
-                "",
-                f"Direct status API returned {resp.status_code} (token scope limitation).",
-                f"Check notebook at: https://www.kaggle.com/code/{ref}",
-            ]
-            return ToolResult(formatted="\n".join(lines), totalResults=1, resultsShared=1)
+    # Fallback: try pulling kernel info (works with some token scopes)
+    pull_resp = await client.get(
+        f"{KAGGLE_API}/kernels/pull",
+        headers=headers,
+        params={"userName": parts[0], "kernelSlug": parts[-1]},
+        timeout=15,
+    )
+    if pull_resp.status_code == 200:
+        data = pull_resp.json()
+        meta = data.get("metadata", {})
+        last_run = meta.get("lastRunTime", "unknown")
+        lines = [
+            f"**Kernel `{ref}`** — pull succeeded",
+            f"**Title**: {meta.get('title', '?')}",
+            f"**Last run**: {last_run}",
+            f"**GPU**: {meta.get('enableGpu', '?')}",
+            "",
+            f"Direct status API returned {resp.status_code} (token scope limitation).",
+            f"Check notebook at: https://www.kaggle.com/code/{ref}",
+        ]
+        return ToolResult(formatted="\n".join(lines), totalResults=1, resultsShared=1)
 
     # Neither worked
     url = f"https://www.kaggle.com/code/{ref}"
@@ -875,6 +919,70 @@ async def _notebook_status(args: dict, _limit: int) -> ToolResult:
         f"The kernel was pushed successfully — it should be running on Kaggle's infrastructure.",
     ]
     return ToolResult(formatted="\n".join(lines), totalResults=1, resultsShared=1)
+
+
+async def _notebook_log(args: dict, _limit: int) -> ToolResult:
+    """Fetch the execution log of a running or completed Kaggle kernel.
+
+    Uses the kernels/output endpoint which returns logs even while the
+    kernel is still running (partial log). This lets you monitor training
+    progress, see print() output, and catch errors early without waiting
+    for the kernel to finish.
+    """
+    ref = args.get("notebook", "") or args.get("ref", "")
+    tail = int(args.get("tail", 50))
+    if not ref:
+        return ToolResult(formatted="Error: `notebook` parameter is required (e.g. 'user/slug').", isError=True)
+
+    if "/" not in ref:
+        username = os.environ.get("KAGGLE_USERNAME", "")
+        ref = f"{username}/{ref}"
+
+    parts = ref.split("/")
+    headers = _require_auth()
+    client = _get_client()
+
+    resp = await client.get(
+        f"{KAGGLE_API}/kernels/output",
+        headers=headers,
+        params={"userName": parts[0], "kernelSlug": parts[-1]},
+        timeout=30,
+    )
+
+    if resp.status_code != 200:
+        url = f"https://www.kaggle.com/code/{ref}"
+        return ToolResult(
+            formatted=(
+                f"Could not fetch log ({resp.status_code}). The kernel may still be starting.\n"
+                f"View in browser: {url}"
+            ),
+            isError=True,
+        )
+
+    content_type = resp.headers.get("content-type", "")
+    log_text = ""
+
+    if "application/json" in content_type:
+        data = resp.json()
+        if isinstance(data, dict):
+            log_text = data.get("log", "")
+    if not log_text:
+        log_text = "(No log output yet — kernel may still be queued or starting.)"
+
+    # Show last N lines
+    log_lines = log_text.strip().split("\n")
+    total_lines = len(log_lines)
+    shown = log_lines[-tail:]
+
+    lines = [
+        f"**Kernel log for `{ref}`** (last {len(shown)} of {total_lines} lines)",
+        f"**View in browser**: https://www.kaggle.com/code/{ref}",
+        "",
+        "```",
+        *shown,
+        "```",
+    ]
+    return ToolResult(formatted="\n".join(lines), totalResults=total_lines, resultsShared=len(shown))
 
 
 async def _notebook_output(args: dict, _limit: int) -> ToolResult:
@@ -898,64 +1006,64 @@ async def _notebook_output(args: dict, _limit: int) -> ToolResult:
         dest_dir = os.path.join(os.getcwd(), "kaggle_output", parts[-1])
     os.makedirs(dest_dir, exist_ok=True)
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        resp = await client.get(
-            f"{KAGGLE_API}/kernels/output",
-            headers=headers,
-            params={"userName": parts[0], "kernelSlug": parts[-1]},
-            timeout=120,
+    client = _get_client(follow_redirects=True)
+    resp = await client.get(
+        f"{KAGGLE_API}/kernels/output",
+        headers=headers,
+        params={"userName": parts[0], "kernelSlug": parts[-1]},
+        timeout=120,
+    )
+
+    if resp.status_code != 200:
+        return ToolResult(
+            formatted=f"Output download failed ({resp.status_code}): {resp.text[:300]}",
+            isError=True,
         )
 
-        if resp.status_code != 200:
-            return ToolResult(
-                formatted=f"Output download failed ({resp.status_code}): {resp.text[:300]}",
-                isError=True,
-            )
+    # The response may be a zip file or JSON with file list
+    content_type = resp.headers.get("content-type", "")
+    files_saved = []
 
-        # The response may be a zip file or JSON with file list
-        content_type = resp.headers.get("content-type", "")
-        files_saved = []
-
-        if "application/zip" in content_type or "application/octet-stream" in content_type:
-            import zipfile
-            import io
-            zip_path = os.path.join(dest_dir, "output.zip")
-            with open(zip_path, "wb") as f:
-                f.write(resp.content)
-            # Extract
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(dest_dir)
-                files_saved = zf.namelist()
-        elif "application/json" in content_type:
-            data = resp.json()
-            if isinstance(data, dict) and "files" in data:
-                for finfo in data["files"]:
-                    fname = finfo.get("fileName", "unknown")
-                    furl = finfo.get("url", "")
-                    if furl:
-                        file_resp = await client.get(furl, headers=headers, timeout=120)
-                        fpath = os.path.join(dest_dir, fname)
-                        os.makedirs(os.path.dirname(fpath), exist_ok=True)
-                        with open(fpath, "wb") as f:
-                            f.write(file_resp.content)
-                        files_saved.append(fname)
-                if "log" in data:
-                    log_path = os.path.join(dest_dir, "kernel_log.txt")
-                    with open(log_path, "w") as f:
-                        f.write(data["log"])
-                    files_saved.append("kernel_log.txt")
-            else:
-                # Save raw JSON response
-                raw_path = os.path.join(dest_dir, "output.json")
-                with open(raw_path, "w") as f:
-                    json.dump(data, f, indent=2)
-                files_saved.append("output.json")
+    if "application/zip" in content_type or "application/octet-stream" in content_type:
+        import zipfile
+        import io
+        zip_path = os.path.join(dest_dir, "output.zip")
+        with open(zip_path, "wb") as f:
+            f.write(resp.content)
+        # Extract
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(dest_dir)
+            files_saved = zf.namelist()
+    elif "application/json" in content_type:
+        data = resp.json()
+        if isinstance(data, dict) and "files" in data:
+            for finfo in data["files"]:
+                fname = finfo.get("fileName", "unknown")
+                furl = finfo.get("url", "")
+                if furl:
+                    file_resp = await client.get(furl, headers=headers, timeout=120)
+                    fpath = os.path.join(dest_dir, fname)
+                    os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                    with open(fpath, "wb") as f:
+                        f.write(file_resp.content)
+                    files_saved.append(fname)
+            if "log" in data:
+                log_path = os.path.join(dest_dir, "kernel_log.txt")
+                with open(log_path, "w") as f:
+                    f.write(data["log"])
+                files_saved.append("kernel_log.txt")
         else:
-            # Save raw content
-            raw_path = os.path.join(dest_dir, "output.bin")
-            with open(raw_path, "wb") as f:
-                f.write(resp.content)
-            files_saved.append("output.bin")
+            # Save raw JSON response
+            raw_path = os.path.join(dest_dir, "output.json")
+            with open(raw_path, "w") as f:
+                json.dump(data, f, indent=2)
+            files_saved.append("output.json")
+    else:
+        # Save raw content
+        raw_path = os.path.join(dest_dir, "output.bin")
+        with open(raw_path, "wb") as f:
+            f.write(resp.content)
+        files_saved.append("output.bin")
 
     lines = [
         f"**Output for `{ref}`** saved to `{dest_dir}`",
@@ -1132,6 +1240,7 @@ _OPERATIONS: dict[str, Any] = {
     "submit": _submit,
     "push_notebook": _push_notebook,
     "notebook_status": _notebook_status,
+    "notebook_log": _notebook_log,
     "notebook_output": _notebook_output,
     "score_history": _score_history,
     "save_run": _save_run_op,
@@ -1161,6 +1270,7 @@ KAGGLE_TOOL_SPEC: dict[str, Any] = {
         "- submit: Submit to competition — from kernel output (notebook, file_name, version) or local file (file_path). REQUIRES APPROVAL\n"
         "- push_notebook: Push a .py/.ipynb script to Kaggle and run it on GPU (script_path, competition, gpu, model_sources) — REQUIRES APPROVAL\n"
         "- notebook_status: Check execution status of a pushed kernel (notebook: 'user/slug')\n"
+        "- notebook_log: View live/partial execution log of a running kernel — monitor training progress (notebook, tail)\n"
         "- notebook_output: Download output files from a completed kernel (notebook, dest_dir)\n"
         "- score_history: View local score tracking with trend analysis (competition)\n"
         "- save_run: Log a run event — notebook push, error, fix, submission (competition, run_type, hypothesis, result, error_summary, fix_applied, score)\n"
@@ -1172,6 +1282,7 @@ KAGGLE_TOOL_SPEC: dict[str, Any] = {
         '  kaggle(operation="push_notebook", script_path="./train.py", competition="comp-slug", gpu=true, '
         'model_sources=["metric/nemotron-3-nano-30b-a3b-bf16/transformers/default"])\n'
         '  kaggle(operation="notebook_status", notebook="user/kernel-slug")\n'
+        '  kaggle(operation="notebook_log", notebook="user/kernel-slug", tail=100)\n'
         '  kaggle(operation="notebook_output", notebook="user/kernel-slug")\n'
         '  kaggle(operation="submit", competition="comp-slug", notebook="user/kernel-slug", '
         'file_name="submission.zip", version="1", message="v9 baseline", hypothesis="LoRA rank 32 + CoT labels")\n'
@@ -1188,7 +1299,7 @@ KAGGLE_TOOL_SPEC: dict[str, Any] = {
             },
             "competition": {
                 "type": "string",
-                "description": "Competition slug (e.g. 'titanic', 'nvidia-nemotron-reasoning-challenge').",
+                "description": "Competition slug (e.g. 'titanic', 'nvidia-nemotron-model-reasoning-challenge').",
             },
             "search": {
                 "type": "string",
@@ -1260,6 +1371,10 @@ KAGGLE_TOOL_SPEC: dict[str, Any] = {
             "dest_dir": {
                 "type": "string",
                 "description": "Local directory to save notebook_output files.",
+            },
+            "tail": {
+                "type": "integer",
+                "description": "Number of log lines to show from the end for notebook_log (default 50).",
             },
             "message": {
                 "type": "string",
