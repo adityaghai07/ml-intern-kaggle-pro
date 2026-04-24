@@ -86,6 +86,32 @@ Phase 5: Iterate
   └─ Max 3 submissions/day enforced
 ```
 
+## Competition Memory
+
+The agent maintains persistent memory across sessions so it never starts from scratch:
+
+```
+~/.kaggle/
+  ├─ agent_runs/
+  │   └─ {competition}.json      ← every push, error, fix, and submission with timestamps
+  └─ agent_scores/
+      └─ {competition}.json      ← score history with trend analysis
+```
+
+**What gets remembered:**
+- Every notebook push (version, hypothesis, result)
+- Every error with its exact message and the fix that resolved it
+- Every submission with its hypothesis and score
+- Research notes (approaches found in top notebooks and discussions)
+
+**How it's used on session restart:**
+1. Agent reads `run_history` first — sees all past errors and their fixes, so it never repeats the same mistake (e.g. wrong GPU, missing cutlass, bad data path)
+2. Checks `score_history` — knows the current best score and whether the trend is improving
+3. Checks `my_submissions` — knows how many of today's 3 submission slots are used
+4. Compares current top notebooks against what it already tried — only pursues new ideas
+
+This means session 2 picks up exactly where session 1 left off, and session 10 has the accumulated knowledge of all 9 sessions before it.
+
 ## Quick Start
 
 ### Installation
