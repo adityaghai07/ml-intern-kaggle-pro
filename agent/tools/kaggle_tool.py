@@ -530,23 +530,25 @@ async def _my_submissions(args: dict, limit: int) -> ToolResult:
 
 
 async def _submit(args: dict, _limit: int) -> ToolResult:
-    """Submit predictions to a Kaggle competition.
+    """Submit to a Kaggle competition.
 
-    Uses httpx multipart upload with Bearer/Basic auth.
-    Falls back to kaggle Python package if direct upload fails.
+    Two modes:
+    1. From kernel output (preferred for large files): provide notebook + file_name + version
+       → runs: kaggle competitions submit -c <comp> -f <file_name> -k <notebook> -v <version> -m <msg>
+    2. From local file: provide file_path
+       → uploads via API or kaggle package
     Records the submission in local score history.
     """
     comp = args.get("competition", "")
     file_path = args.get("file_path", "")
+    file_name = args.get("file_name", "submission.zip")  # filename within kernel output
+    notebook = args.get("notebook", "")  # kernel ref e.g. "user/slug"
+    version = args.get("version", "")
     message = args.get("message", "Agent submission")
     hypothesis = args.get("hypothesis", "")
 
     if not comp:
         return ToolResult(formatted="Error: `competition` parameter is required.", isError=True)
-    if not file_path:
-        return ToolResult(formatted="Error: `file_path` parameter is required.", isError=True)
-    if not os.path.isfile(file_path):
-        return ToolResult(formatted=f"Error: file not found: {file_path}", isError=True)
 
     # Daily submission cap check
     today_count = _today_submission_count(comp)
@@ -557,73 +559,106 @@ async def _submit(args: dict, _limit: int) -> ToolResult:
             isError=True,
         )
 
-    headers = _require_auth()
     result = None
+    submit_source = ""
 
-    # Try direct httpx upload first (works with both Bearer and Basic auth)
-    try:
-        async with httpx.AsyncClient() as client:
-            url = f"{KAGGLE_API}/competitions/submissions/url/{comp}"
-            # Step 1: get upload URL
-            resp = await client.post(
-                url,
-                headers=headers,
-                json={"fileName": os.path.basename(file_path), "contentLength": os.path.getsize(file_path)},
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                upload_info = resp.json()
-                upload_url = upload_info.get("createUrl", "")
-                if upload_url:
-                    # Step 2: upload file
-                    with open(file_path, "rb") as f:
-                        upload_resp = await client.put(upload_url, content=f.read(), timeout=120)
-                    if upload_resp.status_code in (200, 201):
-                        # Step 3: finalize submission
-                        token = upload_info.get("token", "")
-                        submit_resp = await client.post(
-                            f"{KAGGLE_API}/competitions/submissions/submit/{comp}",
-                            headers=headers,
-                            json={"blobFileTokens": token, "submissionDescription": message},
-                            timeout=30,
-                        )
-                        result = submit_resp.text
-                    else:
-                        result = f"Upload failed: {upload_resp.status_code}"
-            else:
-                # Fallback: try kaggle package
-                raise RuntimeError(f"Direct upload init failed ({resp.status_code}), trying kaggle package")
-    except Exception:
-        # Fallback to kaggle Python package
+    if notebook:
+        # Mode 1: Submit from kernel output (no download needed)
+        import subprocess
+        cmd = [
+            "kaggle", "competitions", "submit",
+            "-c", comp,
+            "-f", file_name,
+            "-k", notebook,
+            "-m", message,
+        ]
+        if version:
+            cmd.extend(["-v", str(version)])
         try:
-            def _do_submit():
-                from kaggle.api.kaggle_api_extended import KaggleApi
-                api = KaggleApi()
-                api.authenticate()
-                return api.competition_submit(
-                    file_name=file_path,
-                    message=message,
-                    competition=comp,
+            proc = await asyncio.to_thread(
+                subprocess.run, cmd,
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode == 0:
+                result = proc.stdout.strip() or "Submitted successfully"
+            else:
+                return ToolResult(
+                    formatted=f"Submission failed (exit {proc.returncode}):\n{proc.stderr.strip()}\n{proc.stdout.strip()}",
+                    isError=True,
                 )
-            result = await asyncio.to_thread(_do_submit)
         except Exception as e:
             return ToolResult(formatted=f"Submission failed: {e}", isError=True)
+        submit_source = f"kernel:{notebook}" + (f"@v{version}" if version else "")
+    elif file_path:
+        # Mode 2: Submit from local file
+        if not os.path.isfile(file_path):
+            return ToolResult(formatted=f"Error: file not found: {file_path}", isError=True)
+
+        headers = _require_auth()
+        try:
+            async with httpx.AsyncClient() as client:
+                url = f"{KAGGLE_API}/competitions/submissions/url/{comp}"
+                resp = await client.post(
+                    url,
+                    headers=headers,
+                    json={"fileName": os.path.basename(file_path), "contentLength": os.path.getsize(file_path)},
+                    timeout=30,
+                )
+                if resp.status_code == 200:
+                    upload_info = resp.json()
+                    upload_url = upload_info.get("createUrl", "")
+                    if upload_url:
+                        with open(file_path, "rb") as f:
+                            upload_resp = await client.put(upload_url, content=f.read(), timeout=120)
+                        if upload_resp.status_code in (200, 201):
+                            token = upload_info.get("token", "")
+                            submit_resp = await client.post(
+                                f"{KAGGLE_API}/competitions/submissions/submit/{comp}",
+                                headers=headers,
+                                json={"blobFileTokens": token, "submissionDescription": message},
+                                timeout=30,
+                            )
+                            result = submit_resp.text
+                        else:
+                            result = f"Upload failed: {upload_resp.status_code}"
+                else:
+                    raise RuntimeError(f"Direct upload init failed ({resp.status_code})")
+        except Exception:
+            try:
+                def _do_submit():
+                    from kaggle.api.kaggle_api_extended import KaggleApi
+                    api = KaggleApi()
+                    api.authenticate()
+                    return api.competition_submit(
+                        file_name=file_path,
+                        message=message,
+                        competition=comp,
+                    )
+                result = await asyncio.to_thread(_do_submit)
+            except Exception as e:
+                return ToolResult(formatted=f"Submission failed: {e}", isError=True)
+        submit_source = file_path
+    else:
+        return ToolResult(
+            formatted="Error: provide either `notebook` (for kernel output submission) or `file_path` (for local file).",
+            isError=True,
+        )
 
     # Track in local score history
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "competition": comp,
-        "file": file_path,
+        "source": submit_source,
         "message": message,
         "hypothesis": hypothesis,
-        "score": "pending",  # Updated when score is available
+        "score": "pending",
         "api_result": str(result) if result else "ok",
     }
     _save_score(comp, entry)
 
     lines = [
         f"Submission to `{comp}` uploaded successfully.",
-        f"**File**: {file_path}",
+        f"**Source**: {submit_source}",
         f"**Message**: {message}",
     ]
     if hypothesis:
@@ -871,55 +906,56 @@ async def _notebook_output(args: dict, _limit: int) -> ToolResult:
             timeout=120,
         )
 
-    if resp.status_code != 200:
-        return ToolResult(
-            formatted=f"Output download failed ({resp.status_code}): {resp.text[:300]}",
-            isError=True,
-        )
+        if resp.status_code != 200:
+            return ToolResult(
+                formatted=f"Output download failed ({resp.status_code}): {resp.text[:300]}",
+                isError=True,
+            )
 
-    # The response may be a zip file or JSON with file list
-    content_type = resp.headers.get("content-type", "")
-    files_saved = []
+        # The response may be a zip file or JSON with file list
+        content_type = resp.headers.get("content-type", "")
+        files_saved = []
 
-    if "application/zip" in content_type or "application/octet-stream" in content_type:
-        import zipfile
-        import io
-        zip_path = os.path.join(dest_dir, "output.zip")
-        with open(zip_path, "wb") as f:
-            f.write(resp.content)
-        # Extract
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(dest_dir)
-            files_saved = zf.namelist()
-    elif "application/json" in content_type:
-        data = resp.json()
-        if isinstance(data, dict) and "files" in data:
-            for finfo in data["files"]:
-                fname = finfo.get("fileName", "unknown")
-                furl = finfo.get("url", "")
-                if furl:
-                    file_resp = await client.get(furl, headers=headers, timeout=120)
-                    fpath = os.path.join(dest_dir, fname)
-                    with open(fpath, "wb") as f:
-                        f.write(file_resp.content)
-                    files_saved.append(fname)
-            if "log" in data:
-                log_path = os.path.join(dest_dir, "kernel_log.txt")
-                with open(log_path, "w") as f:
-                    f.write(data["log"])
-                files_saved.append("kernel_log.txt")
+        if "application/zip" in content_type or "application/octet-stream" in content_type:
+            import zipfile
+            import io
+            zip_path = os.path.join(dest_dir, "output.zip")
+            with open(zip_path, "wb") as f:
+                f.write(resp.content)
+            # Extract
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(dest_dir)
+                files_saved = zf.namelist()
+        elif "application/json" in content_type:
+            data = resp.json()
+            if isinstance(data, dict) and "files" in data:
+                for finfo in data["files"]:
+                    fname = finfo.get("fileName", "unknown")
+                    furl = finfo.get("url", "")
+                    if furl:
+                        file_resp = await client.get(furl, headers=headers, timeout=120)
+                        fpath = os.path.join(dest_dir, fname)
+                        os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                        with open(fpath, "wb") as f:
+                            f.write(file_resp.content)
+                        files_saved.append(fname)
+                if "log" in data:
+                    log_path = os.path.join(dest_dir, "kernel_log.txt")
+                    with open(log_path, "w") as f:
+                        f.write(data["log"])
+                    files_saved.append("kernel_log.txt")
+            else:
+                # Save raw JSON response
+                raw_path = os.path.join(dest_dir, "output.json")
+                with open(raw_path, "w") as f:
+                    json.dump(data, f, indent=2)
+                files_saved.append("output.json")
         else:
-            # Save raw JSON response
-            raw_path = os.path.join(dest_dir, "output.json")
-            with open(raw_path, "w") as f:
-                json.dump(data, f, indent=2)
-            files_saved.append("output.json")
-    else:
-        # Save raw content
-        raw_path = os.path.join(dest_dir, "output.bin")
-        with open(raw_path, "wb") as f:
-            f.write(resp.content)
-        files_saved.append("output.bin")
+            # Save raw content
+            raw_path = os.path.join(dest_dir, "output.bin")
+            with open(raw_path, "wb") as f:
+                f.write(resp.content)
+            files_saved.append("output.bin")
 
     lines = [
         f"**Output for `{ref}`** saved to `{dest_dir}`",
@@ -1122,7 +1158,7 @@ KAGGLE_TOOL_SPEC: dict[str, Any] = {
         "- read_discussion: Read a discussion topic (topic_id)\n"
         "- leaderboard: View top leaderboard entries (competition)\n"
         "- my_submissions: List your submissions + local tracking (competition)\n"
-        "- submit: Submit predictions file (competition, file_path, message, hypothesis) — REQUIRES APPROVAL\n"
+        "- submit: Submit to competition — from kernel output (notebook, file_name, version) or local file (file_path). REQUIRES APPROVAL\n"
         "- push_notebook: Push a .py/.ipynb script to Kaggle and run it on GPU (script_path, competition, gpu, model_sources) — REQUIRES APPROVAL\n"
         "- notebook_status: Check execution status of a pushed kernel (notebook: 'user/slug')\n"
         "- notebook_output: Download output files from a completed kernel (notebook, dest_dir)\n"
@@ -1137,6 +1173,8 @@ KAGGLE_TOOL_SPEC: dict[str, Any] = {
         'model_sources=["metric/nemotron-3-nano-30b-a3b-bf16/transformers/default"])\n'
         '  kaggle(operation="notebook_status", notebook="user/kernel-slug")\n'
         '  kaggle(operation="notebook_output", notebook="user/kernel-slug")\n'
+        '  kaggle(operation="submit", competition="comp-slug", notebook="user/kernel-slug", '
+        'file_name="submission.zip", version="1", message="v9 baseline", hypothesis="LoRA rank 32 + CoT labels")\n'
         '  kaggle(operation="submit", competition="titanic", file_path="/path/to/submission.csv", '
         'message="XGBoost v2", hypothesis="Adding feature interactions improves AUC")\n'
     ),
@@ -1174,7 +1212,11 @@ KAGGLE_TOOL_SPEC: dict[str, Any] = {
             },
             "file_path": {
                 "type": "string",
-                "description": "Path to submission file for submit.",
+                "description": "Path to local submission file for submit (mode 2).",
+            },
+            "file_name": {
+                "type": "string",
+                "description": "Filename within kernel output for submit (default: submission.zip). Used with notebook param.",
             },
             "script_path": {
                 "type": "string",
