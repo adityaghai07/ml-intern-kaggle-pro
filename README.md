@@ -50,7 +50,7 @@ A full-loop autonomous Kaggle workflow built on top of the existing HuggingFace 
 | `read_discussion` | Read discussion with replies | No |
 | `leaderboard` | View top leaderboard entries | No |
 | `my_submissions` | List your submissions + scores | No |
-| `submit` | Submit predictions file | **Yes** |
+| `submit` | Submit from kernel output (`-k notebook -v version`) or local file | **Yes** |
 | `push_notebook` | Push script to Kaggle GPU and run it | **Yes** |
 | `notebook_status` | Poll execution status | No |
 | `notebook_output` | Download output files/logs | No |
@@ -70,7 +70,7 @@ Phase 1: Competition Analysis (first time)
   └─ Details, data files, leaderboard, notebook_metadata from official demo
 
 Phase 2: Research (every session)
-  └─ Check for new top notebooks, read discussions, deep paper research
+  └─ Check for new top notebooks, read latest 3-5 discussions, deep paper research
 
 Phase 3: Implement & Push
   └─ Write script with pre-flight checklist → push_notebook with correct
@@ -79,7 +79,7 @@ Phase 3: Implement & Push
 Phase 4: Poll & Recover
   └─ 5min → 10min → 15min polling
   └─ On error: download logs → analyze → fix → re-push → log via save_run
-  └─ On success: download output → submit with hypothesis
+  └─ On success: submit directly from kernel output (no download needed)
 
 Phase 5: Iterate
   └─ Check score → analyze → research new ideas → implement next version
@@ -91,7 +91,7 @@ Phase 5: Iterate
 ### Installation
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/adityaghai07/ml-intern-kaggle-pro.git
 cd ml-intern-kaggle-pro
 pip install -e ".[dev]"
 ```
