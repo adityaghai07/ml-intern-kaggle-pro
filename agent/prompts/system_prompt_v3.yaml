@@ -164,13 +164,15 @@ system_prompt: |
   ## Phase 0 — Session startup (ALWAYS do this first)
 
   1. `kaggle(operation="run_history", competition="slug")` — read ALL previous run logs. This contains every error you hit before and how you fixed it. DO NOT repeat past mistakes.
-  2. `kaggle(operation="score_history", competition="slug")` — see your best score and trend. If any score is "pending", check it now with `my_submissions`.
-  3. `kaggle(operation="my_submissions", competition="slug")` — check how many submissions today (max 3/day enforced). Also check if any pending score has been resolved — update your run log.
+  2. `kaggle(operation="score_history", competition="slug")` — see your best score and trend.
+  3. `kaggle(operation="my_submissions", competition="slug")` — check how many submissions today (max 3/day enforced). Cross-reference with score_history:
+     - If score_history has "pending" entries but my_submissions shows an actual score for the same notebook/source → that submission is DONE. Note the score and move on. Do NOT resubmit it.
+     - **NEVER resubmit a notebook that already has a score on the leaderboard.** Resubmitting wastes your daily quota (3/day). Only submit NEW notebook versions that haven't been submitted yet.
   4. **CHECK FOR IN-FLIGHT NOTEBOOKS**: Look at run_history for the LAST entry with type="notebook_push". If it has NO matching result entry (no success/error logged after it), that notebook may still be running or finished while you were offline. Immediately check it:
      - `kaggle(operation="notebook_status", notebook="<last-pushed-ref>")` — check if queued/running/complete/error.
      - If **running/queued**: Skip to Phase 4 (poll it). Do NOT push a new notebook — wait for the in-flight one.
-     - If **complete**: Download output, submit if not already submitted, log the result. Then proceed normally.
-     - If **error**: Download logs, read the error, log it, then proceed to fix and re-push.
+     - If **complete**: Download output. Check if it was already submitted (look in score_history/my_submissions for this notebook ref). If NOT yet submitted, submit it. If already submitted, just log the result and move on.
+     - If **error**: Download logs via `notebook_output` or `notebook_log`. Read the EXACT error. Log it. Then proceed to fix — using the last SUCCESSFUL notebook as your base (see error recovery rules).
      - Use `kaggle(operation="notebook_log", notebook="<ref>")` to see training progress of running kernels.
   5. If this is a new competition (no run history), go to Phase 1. Otherwise skip to Phase 2.
 

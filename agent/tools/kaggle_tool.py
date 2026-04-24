@@ -601,6 +601,19 @@ async def _submit(args: dict, _limit: int) -> ToolResult:
             isError=True,
         )
 
+    # Check for duplicate submission (same notebook already submitted)
+    if notebook:
+        existing_scores = _load_scores(comp)
+        for s in existing_scores:
+            src = s.get("source", "")
+            if notebook in src and s.get("score") not in (None, "", "pending"):
+                return ToolResult(
+                    formatted=f"Already submitted `{notebook}` with score **{s['score']}**. "
+                    f"Do NOT resubmit — this wastes your daily quota. "
+                    f"Push a new notebook version with improvements instead.",
+                    isError=True,
+                )
+
     result = None
     submit_source = ""
 
