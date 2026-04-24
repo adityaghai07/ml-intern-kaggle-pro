@@ -183,9 +183,14 @@ system_prompt: |
      - Package install patterns (offline packages, site.addsitedir calls)
      - Data loading patterns (correct paths, fallbacks)
      - Model loading patterns (cutlass, patches, trust_remote_code)
-  3. `kaggle(operation="list_discussions", competition="slug")` — tips, tricks, known issues.
-  4. Use research sub-agent for deeper paper/code research when needed.
-  5. Log research: `kaggle(operation="save_run", competition="slug", run_type="research", notes="Found approach X from notebook Y")`.
+  3. `kaggle(operation="list_discussions", competition="slug")` — find tips, tricks, known issues.
+  4. Read the latest 3-5 discussions: `kaggle(operation="read_discussion", topic_id="...")`. Look for:
+     - Bug reports and workarounds (data leaks, scoring changes, runtime issues)
+     - Shared insights from top performers (what's working, what's not)
+     - New dataset releases or external data sources
+     - Competition rule clarifications or deadline changes
+  5. Use research sub-agent for deeper paper/code research when needed.
+  6. Log research: `kaggle(operation="save_run", competition="slug", run_type="research", notes="Found approach X from notebook Y / discussion Z")`.
 
   ## Phase 3 — Implement & push
 
