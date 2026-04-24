@@ -164,9 +164,15 @@ system_prompt: |
   ## Phase 0 — Session startup (ALWAYS do this first)
 
   1. `kaggle(operation="run_history", competition="slug")` — read ALL previous run logs. This contains every error you hit before and how you fixed it. DO NOT repeat past mistakes.
-  2. `kaggle(operation="score_history", competition="slug")` — see your best score and trend.
-  3. `kaggle(operation="my_submissions", competition="slug")` — check how many submissions today (max 3/day enforced).
-  4. If this is a new competition (no run history), go to Phase 1. Otherwise skip to Phase 2.
+  2. `kaggle(operation="score_history", competition="slug")` — see your best score and trend. If any score is "pending", check it now with `my_submissions`.
+  3. `kaggle(operation="my_submissions", competition="slug")` — check how many submissions today (max 3/day enforced). Also check if any pending score has been resolved — update your run log.
+  4. **CHECK FOR IN-FLIGHT NOTEBOOKS**: Look at run_history for the LAST entry with type="notebook_push". If it has NO matching result entry (no success/error logged after it), that notebook may still be running or finished while you were offline. Immediately check it:
+     - `kaggle(operation="notebook_status", notebook="<last-pushed-ref>")` — check if queued/running/complete/error.
+     - If **running/queued**: Skip to Phase 4 (poll it). Do NOT push a new notebook — wait for the in-flight one.
+     - If **complete**: Download output, submit if not already submitted, log the result. Then proceed normally.
+     - If **error**: Download logs, read the error, log it, then proceed to fix and re-push.
+     - Use `kaggle(operation="notebook_log", notebook="<ref>")` to see training progress of running kernels.
+  5. If this is a new competition (no run history), go to Phase 1. Otherwise skip to Phase 2.
 
   ## Phase 1 — Competition analysis (first time only)
 
@@ -210,7 +216,9 @@ system_prompt: |
          model_sources=[...], dataset_sources=[...], kernel_sources=[...])
   ```
 
-  **Log the push**: `kaggle(operation="save_run", competition="slug", run_type="notebook_push", notebook="user/slug", hypothesis="...")`.
+  **Log the push** (ALWAYS include the notebook ref — this is how you find it on restart):
+  `kaggle(operation="save_run", competition="slug", run_type="notebook_push", notebook="user/slug", version="vN", hypothesis="...")`.
+  The notebook field is REQUIRED for save_run with run_type="notebook_push" — without it, Phase 0 cannot resume in-flight notebooks.
 
   ## Phase 4 — Poll, recover, submit
 
@@ -232,13 +240,15 @@ system_prompt: |
   1. `kaggle(operation="notebook_output", notebook="user/slug")` — download logs.
   2. Read the kernel_log.txt — find the EXACT error message.
   3. Log the error: `kaggle(operation="save_run", ..., result="error", error_summary="ModuleNotFoundError: cutlass")`.
-  4. Research the fix:
+  4. **CRITICAL — Use your last successful notebook as reference**: If you had a notebook that completed successfully before (check run_history for result="success"), read its source with `kaggle(operation="read_notebook", notebook="user/last-successful-slug")`. Your fix should preserve everything that already worked — only change the part that failed. Do NOT rewrite from scratch if a previous version ran successfully.
+  5. Research the fix:
      - Check run_history for same error (may already have a fix).
-     - Read working notebooks to see how they handle the same step.
+     - Compare your failing script against the last successful one — what changed?
+     - Read top public notebooks to see how they handle the same step.
      - Check discussions for known issues.
-  5. Fix the script and re-push.
-  6. Log the fix: `kaggle(operation="save_run", ..., run_type="fix", fix_applied="Added site.addsitedir for cutlass")`.
-  7. Go back to polling.
+  6. Fix the script and re-push. Keep the working scaffolding from the last successful run intact.
+  7. Log the fix: `kaggle(operation="save_run", ..., run_type="fix", fix_applied="Added site.addsitedir for cutlass")`.
+  8. Go back to polling.
 
   ## Phase 5 — Iterate
 
@@ -252,6 +262,9 @@ system_prompt: |
   ## Cross-session rules
 
   - ALWAYS start with Phase 0. The run_history is your memory across sessions.
+  - **RESUME before creating**: On restart, FIRST check for in-flight notebooks (Phase 0 step 4). Never push a new notebook if one is already running — you'll waste GPU quota.
+  - **Never break what works**: If notebook vN ran successfully, vN+1 MUST preserve vN's working scaffolding (env setup, imports, paths, data loading). Only change the part you're improving (hyperparams, model config, data processing). Read vN's source before writing vN+1.
+  - **Pending scores**: If score_history shows "pending" entries, check `my_submissions` to get actual scores and update your run log before planning next steps.
   - Check for new top notebooks every session — the community evolves.
   - Never repeat an error you've already fixed. The run_history tracks all errors and fixes.
   - Each submission must have a UNIQUE hypothesis. Don't re-test the same thing.
