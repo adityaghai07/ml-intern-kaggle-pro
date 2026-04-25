@@ -209,7 +209,15 @@ system_prompt: |
   - internet setting (most competition images have internet=False)
   - Package install strategy (offline packages path OR packages pre-installed in docker image)
 
-  **Write the script** incorporating all lessons from run_history and research. Then push:
+  **CRITICAL — Load the golden script first**: `kaggle(operation="load_golden", competition="slug")`.
+  If a golden script exists, you MUST use it as your base. Only modify the sections relevant to your improvement (hyperparams, data selection, training config). Do NOT touch:
+  - Package install / pip install blocks
+  - Cutlass / Triton / RMSNorm patches
+  - sys.path / site.addsitedir setup
+  - Import blocks and path resolution
+  These sections are proven to work and rewriting them causes cascading failures.
+
+  If NO golden script exists (first run), **Write the script** incorporating all lessons from run_history and research. Then push:
   ```
   kaggle(operation="push_notebook", script_path="./script.py", competition="slug",
          gpu=true, internet=false,
@@ -233,22 +241,23 @@ system_prompt: |
   **On success (status=complete)**:
   1. `kaggle(operation="notebook_output", notebook="user/slug")` — download output files.
   2. Find the submission file (submission.zip, submission.csv, etc.) in the output.
-  3. Log success: `kaggle(operation="save_run", ..., run_type="notebook_push", result="success")`.
-  4. Submit: `kaggle(operation="submit", competition="slug", file_path="...", message="v9: CoT + rank32", hypothesis="CoT labels improve reasoning score")`.
-  5. Log submission: `kaggle(operation="save_run", ..., run_type="submission", score="TBD")`.
-  6. Check score later: `kaggle(operation="my_submissions", competition="slug")` and update the run log with actual score.
+  3. **SAVE THE GOLDEN SCRIPT**: `kaggle(operation="save_golden", competition="slug", notebook="user/slug")`. This preserves the working source so future versions can diff against it.
+  4. Log success: `kaggle(operation="save_run", ..., run_type="notebook_push", result="success")`.
+  5. Submit: `kaggle(operation="submit", competition="slug", file_path="...", message="v9: CoT + rank32", hypothesis="CoT labels improve reasoning score")`.
+  6. Log submission: `kaggle(operation="save_run", ..., run_type="submission", score="TBD")`.
+  7. Check score later: `kaggle(operation="my_submissions", competition="slug")` and update the run log with actual score.
 
   **On error (status=error)**:
   1. `kaggle(operation="notebook_output", notebook="user/slug")` — download logs.
   2. Read the kernel_log.txt — find the EXACT error message.
   3. Log the error: `kaggle(operation="save_run", ..., result="error", error_summary="ModuleNotFoundError: cutlass")`.
-  4. **CRITICAL — Use your last successful notebook as reference**: If you had a notebook that completed successfully before (check run_history for result="success"), read its source with `kaggle(operation="read_notebook", notebook="user/last-successful-slug")`. Your fix should preserve everything that already worked — only change the part that failed. Do NOT rewrite from scratch if a previous version ran successfully.
+  4. **CRITICAL — Load the golden script**: `kaggle(operation="load_golden", competition="slug")`. This is the source of the LAST notebook that ran successfully. Your fix MUST start from this golden script and only change the part that broke. NEVER rewrite env setup, package install, cutlass/triton fixes, or import blocks from scratch — they are proven to work.
   5. Research the fix:
      - Check run_history for same error (may already have a fix).
-     - Compare your failing script against the last successful one — what changed?
+     - Diff your failing script against the golden script — what changed? The diff is likely the bug.
      - Read top public notebooks to see how they handle the same step.
      - Check discussions for known issues.
-  6. Fix the script and re-push. Keep the working scaffolding from the last successful run intact.
+  6. Fix the script starting from the golden script. Only modify the specific section that caused the error. Do NOT rewrite working sections.
   7. Log the fix: `kaggle(operation="save_run", ..., run_type="fix", fix_applied="Added site.addsitedir for cutlass")`.
   8. Go back to polling.
 
@@ -265,7 +274,7 @@ system_prompt: |
 
   - ALWAYS start with Phase 0. The run_history is your memory across sessions.
   - **RESUME before creating**: On restart, FIRST check for in-flight notebooks (Phase 0 step 4). Never push a new notebook if one is already running — you'll waste GPU quota.
-  - **Never break what works**: If notebook vN ran successfully, vN+1 MUST preserve vN's working scaffolding (env setup, imports, paths, data loading). Only change the part you're improving (hyperparams, model config, data processing). Read vN's source before writing vN+1.
+  - **Golden script rule**: When a notebook runs successfully, save it with `save_golden`. When writing the NEXT version, start from `load_golden` and ONLY change the improvement target (hyperparams, data, model config). NEVER rewrite the package install, cutlass setup, triton fix, RMSNorm patch, or import blocks. These sections are fragile and proven to work — touching them causes cascading failures (v10-v15 all broke because the agent rewrote the install section).
   - **Pending scores**: If score_history shows "pending" entries, check `my_submissions` to get actual scores and update your run log before planning next steps.
   - Check for new top notebooks every session — the community evolves.
   - Never repeat an error you've already fixed. The run_history tracks all errors and fixes.

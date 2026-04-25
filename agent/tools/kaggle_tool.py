@@ -156,6 +156,33 @@ def _save_run(competition: str, entry: dict) -> None:
     _runs_path(competition).write_text(json.dumps(runs, indent=2))
 
 
+# ---------------------------------------------------------------------------
+# Golden script persistence (last successfully-run notebook source)
+# ---------------------------------------------------------------------------
+
+_GOLDEN_DIR = Path.home() / ".kaggle" / "agent_golden_scripts"
+
+
+def _golden_path(competition: str) -> Path:
+    _GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
+    return _GOLDEN_DIR / f"{competition}.py"
+
+
+def _save_golden_script(competition: str, source: str, notebook_ref: str) -> None:
+    """Save the source of a successfully-run notebook as the golden reference."""
+    path = _golden_path(competition)
+    header = f"# Golden script: {notebook_ref}\n# Saved: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+    path.write_text(header + source, encoding="utf-8")
+
+
+def _load_golden_script(competition: str) -> str:
+    """Load the golden reference script for a competition."""
+    path = _golden_path(competition)
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return ""
+
+
 def _today_submission_count(competition: str) -> int:
     """Count submissions made today (for daily cap enforcement).
 
@@ -1236,6 +1263,82 @@ async def _run_history(args: dict, limit: int) -> ToolResult:
 
 
 # ---------------------------------------------------------------------------
+# Golden script operations
+# ---------------------------------------------------------------------------
+
+async def _save_golden_op(args: dict, _limit: int) -> ToolResult:
+    """Save a successfully-run notebook's source as the golden reference.
+
+    Call this AFTER a notebook completes successfully (status=complete).
+    Future versions MUST preserve the golden script's env setup, imports,
+    and package install — only changing hyperparams/data/model config.
+    """
+    comp = args.get("competition", "")
+    notebook_ref = args.get("notebook", "")
+    script_path = args.get("script_path", "")
+
+    if not comp:
+        return ToolResult(formatted="Error: `competition` is required.", isError=True)
+
+    source = ""
+    if script_path and os.path.isfile(script_path):
+        with open(script_path, "r", encoding="utf-8") as f:
+            source = f.read()
+    elif notebook_ref:
+        # Pull source from Kaggle API
+        parts = notebook_ref.split("/") if "/" in notebook_ref else ["", notebook_ref]
+        params = {"userName": parts[0], "kernelSlug": parts[-1]}
+        client = _get_client()
+        data = await _kaggle_get(client, "/kernels/pull", params)
+        if data:
+            source = data.get("blob", {}).get("source", "")
+
+    if not source:
+        return ToolResult(formatted="Error: no source found. Provide `script_path` or `notebook`.", isError=True)
+
+    _save_golden_script(comp, source, notebook_ref or script_path)
+    return ToolResult(
+        formatted=f"Golden script saved for `{comp}` ({len(source)} chars). "
+        f"Future versions MUST preserve this script's env setup and only change hyperparams.",
+        totalResults=1, resultsShared=1,
+    )
+
+
+async def _load_golden_op(args: dict, _limit: int) -> ToolResult:
+    """Load the golden reference script for a competition.
+
+    Use this as the BASE for writing new notebook versions. Only modify
+    hyperparams, data config, or model config — never rewrite env setup,
+    package install, cutlass/triton fixes, or import blocks.
+    """
+    comp = args.get("competition", "")
+    if not comp:
+        return ToolResult(formatted="Error: `competition` is required.", isError=True)
+
+    source = _load_golden_script(comp)
+    if not source:
+        return ToolResult(
+            formatted=f"No golden script for `{comp}`. Run save_golden after a successful notebook.",
+        )
+
+    # Truncate for display
+    if len(source) > MAX_NOTEBOOK_CHARS:
+        display = source[:MAX_NOTEBOOK_CHARS] + f"\n\n... (truncated at {MAX_NOTEBOOK_CHARS} chars)"
+    else:
+        display = source
+
+    lines = [
+        f"**Golden script for `{comp}`** ({len(source)} chars)",
+        "Use this as the BASE. Only modify hyperparams/data — never rewrite env setup.",
+        "",
+        "```python",
+        display,
+        "```",
+    ]
+    return ToolResult(formatted="\n".join(lines), totalResults=1, resultsShared=1)
+
+
+# ---------------------------------------------------------------------------
 # Operation dispatch
 # ---------------------------------------------------------------------------
 
@@ -1258,6 +1361,8 @@ _OPERATIONS: dict[str, Any] = {
     "score_history": _score_history,
     "save_run": _save_run_op,
     "run_history": _run_history,
+    "save_golden": _save_golden_op,
+    "load_golden": _load_golden_op,
 }
 
 # ---------------------------------------------------------------------------
@@ -1287,7 +1392,9 @@ KAGGLE_TOOL_SPEC: dict[str, Any] = {
         "- notebook_output: Download output files from a completed kernel (notebook, dest_dir)\n"
         "- score_history: View local score tracking with trend analysis (competition)\n"
         "- save_run: Log a run event — notebook push, error, fix, submission (competition, run_type, hypothesis, result, error_summary, fix_applied, score)\n"
-        "- run_history: View full run log with errors/fixes/scores — READ THIS AT SESSION START to avoid repeating mistakes (competition)\n\n"
+        "- run_history: View full run log with errors/fixes/scores — READ THIS AT SESSION START to avoid repeating mistakes (competition)\n"
+        "- save_golden: Save a successfully-run notebook's source as the golden reference (competition, notebook or script_path). Call after notebook completes.\n"
+        "- load_golden: Load the golden reference script — use as BASE for new versions, only change hyperparams (competition)\n\n"
         "Examples:\n"
         '  kaggle(operation="list_competitions", search="nlp")\n'
         '  kaggle(operation="list_notebooks", competition="titanic", sort_by="voteCount")\n'

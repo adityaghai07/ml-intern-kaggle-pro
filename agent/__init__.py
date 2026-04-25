@@ -2,6 +2,7 @@
 HF Agent - Main agent module
 """
 
+import logging
 import litellm
 
 # Global LiteLLM behavior — set once at package import so both CLI and
@@ -15,6 +16,27 @@ import litellm
 litellm.drop_params = True
 litellm.suppress_debug_info = True
 litellm.modify_params = True
+
+
+# Suppress the "Dropping 'thinking' param" warning from LiteLLM's transformation module.
+# This warning occurs when modify_params=True and the last assistant message with tool_calls
+# has no thinking_blocks. The warning is informational and expected behavior when using
+# tool calls without extended thinking, so we filter it out to reduce noise.
+class LiteLLMThinkingWarningFilter(logging.Filter):
+    """Filter to suppress LiteLLM's thinking parameter drop warnings."""
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Suppress the specific warning about dropping thinking param
+        if record.levelno == logging.WARNING:
+            msg = record.getMessage()
+            if "Dropping 'thinking' param" in msg and "thinking_blocks" in msg:
+                return False
+        return True
+
+
+# Apply the filter to the LiteLLM logger
+litellm_logger = logging.getLogger("LiteLLM")
+litellm_logger.addFilter(LiteLLMThinkingWarningFilter())
 
 from agent.core.agent_loop import submission_loop  # noqa: E402
 
